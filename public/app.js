@@ -186,6 +186,8 @@ function drawResults(items, value, { color = "--moss", pinClass = "", onClick, l
 
 function renderMonths() {
   const sel = new Set(state.months);
+  const label = monthsLabel(state.months, true);
+  $("#months-summary").textContent = label === "all year" ? "All year" : label;
   $("#months").innerHTML =
     `<button class="all" data-all aria-pressed="${!sel.size}">All</button>` +
     MONTHS.map((m, i) => `<button data-m="${i + 1}" class="${i + 1 === NOW_MONTH ? "now" : ""}" aria-pressed="${sel.has(i + 1)}" title="${MONTHS_LONG[i]}${i + 1 === NOW_MONTH ? " (this month)" : ""}">${m[0]}</button>`).join("");

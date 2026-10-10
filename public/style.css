@@ -93,6 +93,8 @@ body.loading .bird-wing { animation: flap 0.3s ease-in-out infinite alternate; }
   width: 100%; appearance: none; border: 1px solid var(--line); background: var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238a948d' stroke-width='2' fill='none'/%3E%3C/svg%3E") no-repeat right 14px center;
   border-radius: 12px; padding: 9px 36px 9px 12px; font-weight: 600; cursor: pointer;
 }
+.months-label { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--ink-2); margin-bottom: -3px; }
+.months-label b { color: var(--moss); }
 .months { display: grid; grid-template-columns: auto repeat(12, minmax(0, 1fr)); gap: 3px; user-select: none; touch-action: none; }
 .months button {
   border: 0; background: var(--card); border-radius: 8px; padding: 6px 0; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--ink-2);
