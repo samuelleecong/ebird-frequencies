@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hotspot Finder</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#fff; --fg:#1d2a22; --muted:#6b7a70; --line:#e3e8e4; --accent:#2f7d4f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141a16; --fg:#e6ece8; --muted:#94a39a; --line:#2a332d; --accent:#5fbf86; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); display:grid; grid-template-columns:minmax(280px,380px) 1fr; height:100vh; }
+  aside { padding:16px; overflow:auto; border-right:1px solid var(--line); }
+  #map { height:100%; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:16px 0 4px; }
+  label { display:block; color:var(--muted); font-size:12px; margin:10px 0 4px; }
+  input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); font:inherit; }
+  .row { display:flex; gap:8px; } .row > div { flex:1; min-width:0; }
+  ol { padding:0; list-style:none; margin:8px 0; }
+  li { padding:8px 0; border-bottom:1px solid var(--line); cursor:pointer; }
+  .bar { height:4px; background:var(--line); border-radius:2px; margin-top:4px; }
+  .bar > i { display:block; height:100%; background:var(--accent); border-radius:2px; }
+  .meta { color:var(--muted); font-size:12px; }
+  button.link { background:none; border:0; color:var(--accent); padding:0; font:inherit; cursor:pointer; }
+  @media (max-width: 700px) { body { grid-template-columns:1fr; grid-template-rows:auto 60vh; height:auto; } aside { border-right:0; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Where to find…</h1>
+  <p class="meta">Frequency = share of complete eBird checklists at a hotspot that reported the species.</p>
+  <label for="species">Species</label>
+  <input id="species" list="species-list" placeholder="e.g. Lanceolated Warbler" autocomplete="off">
+  <datalist id="species-list"></datalist>
+  <label for="country">Region</label>
+  <select id="country"><option value="">World (top hotspots)</option></select>
+  <div class="row">
+    <div><label for="month">Month</label><select id="month"><option value="">All year</option></select></div>
+    <div><label for="min">Min. checklists</label><input id="min" type="number" min="5" value="10"></div>
+  </div>
+  <p class="meta" id="status">Loading…</p>
+  <ol id="results"></ol>
+  <div id="targets"></div>
+  <p class="meta">Data: eBird Basic Dataset, Cornell Lab of Ornithology. <span id="release"></span></p>
+</aside>
+<div id="map"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const pct = (f) => (f * 100).toFixed(f < 0.01 ? 2 : 1) + "%";
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const sum = (a) => a.reduce((x, y) => x + y, 0);
+const pick = (a, m) => (m ? a[m - 1] : sum(a));
+// Lower bound of the 95% Wilson interval: 30 of 100 ranks above 1 of 2
+function wilson(k, n) {
+  if (!n) return 0;
+  const z = 1.96, p = k / n, z2 = z * z;
+  return (p + z2 / (2 * n) - z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / (1 + z2 / n);
+}
+
+const cache = new Map();
+const load = (path) => {
+  if (!cache.has(path)) cache.set(path, fetch("data/" + path).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${path}: HTTP ${r.status}`)))));
+  return cache.get(path);
+};
+
+const map = L.map("map").setView([1.35, 103.82], 11);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let speciesList = [], comByCode = {};
+"Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ").forEach((m, i) => $("month").add(new Option(m, i + 1)));
+
+/** Hotspots for the chosen species and region as {id, name, lat, lng, n[12], k[12], targets}. */
+async function candidates(code, cc) {
+  const s = await load(`species/${code}.json`);
+  if (!cc) return s.w.map(([id, name, lat, lng, , n, k]) => ({ id, name, lat, lng, n, k }));
+  const hotspots = new Map((await load(`countries/${cc}.json`)).map(([id, name, lat, lng, n, t]) => [id, { name, lat, lng, n, t }]));
+  return (s.c[cc] || []).map(([id, k]) => ({ id, k, ...hotspots.get(id) }));
+}
+
+async function search() {
+  const s = speciesList.find((x) => x[1].toLowerCase() === $("species").value.trim().toLowerCase());
+  if (!s) return;
+  const month = Number($("month").value) || 0, min = Number($("min").value) || 5;
+  $("status").textContent = "Loading…";
+  $("targets").innerHTML = "";
+  try {
+    const ranked = (await candidates(s[0], $("country").value))
+      .map((h) => ({ ...h, checklists: pick(h.n, month), detections: pick(h.k, month) }))
+      .filter((h) => h.detections > 0 && h.checklists >= min)
+      .map((h) => ({ ...h, frequency: h.detections / h.checklists, score: wilson(h.detections, h.checklists) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 50);
+    render(ranked);
+    $("status").textContent = ranked.length
+      ? `${ranked.length} hotspots, best first (small samples ranked lower)`
+      : "No hotspots with enough checklists. Try another month, region or a lower minimum.";
+  } catch (e) {
+    $("status").textContent = e.message;
+  }
+}
+
+function render(ranked) {
+  layer.clearLayers();
+  $("results").innerHTML = "";
+  const top = ranked[0]?.frequency || 1;
+  ranked.forEach((h, i) => {
+    const marker = L.circleMarker([h.lat, h.lng], {
+      radius: 5 + 15 * Math.sqrt(h.frequency / top), color: "#2f7d4f", fillOpacity: 0.3 + 0.6 * (h.frequency / top),
+    }).addTo(layer).bindTooltip(`${h.name}: ${pct(h.frequency)}`).on("click", () => showTargets(h));
+    const li = document.createElement("li");
+    li.innerHTML = `${i + 1}. ${esc(h.name)}<div class="meta">${pct(h.frequency)} · ${h.detections} of ${h.checklists} checklists</div><div class="bar"><i style="width:${(100 * h.frequency) / top}%"></i></div>`;
+    li.onclick = () => { map.setView([h.lat, h.lng], 14); showTargets(h); };
+    $("results").append(li);
+  });
+  if (ranked.length) map.fitBounds(L.latLngBounds(ranked.map((h) => [h.lat, h.lng])).pad(0.2));
+}
+
+async function showTargets(h) {
+  const month = Number($("month").value) || 0;
+  let t;
+  try { t = await load(`targets/${h.id}.json`); } catch {
+    $("targets").innerHTML = `<h2>${esc(h.name)}</h2><p class="meta">Full species list is only published for the busiest hotspots.</p>`;
+    return;
+  }
+  const n = pick(t.n, month);
+  const rows = t.s.map(([code, k]) => [code, n ? pick(k, month) / n : 0]).filter(([, f]) => f > 0).sort((a, b) => b[1] - a[1]);
+  $("targets").innerHTML = `<h2>${esc(h.name)}</h2><p class="meta">${n} checklists${month ? " in " + $("month").selectedOptions[0].text : ""}</p>
+    <ol>${rows.slice(0, 40).map(([code, f]) => `<li data-com="${esc(comByCode[code] || code)}">${esc(comByCode[code] || code)}<div class="meta">${pct(f)}</div></li>`).join("")}</ol>`;
+  $("targets").querySelectorAll("li").forEach((li) => (li.onclick = () => { $("species").value = li.dataset.com; search(); }));
+  $("targets").scrollIntoView({ behavior: "smooth" });
+}
+
+["species", "country", "month", "min"].forEach((id) => $(id).addEventListener("change", search));
+
+Promise.all([load("species.json"), load("countries.json"), load("meta.json")]).then(([species, countries, meta]) => {
+  speciesList = species;
+  comByCode = Object.fromEntries(species.map(([code, com]) => [code, com]));
+  $("species-list").innerHTML = species.map(([, com]) => `<option value="${esc(com)}">`).join("");
+  const names = new Intl.DisplayNames(["en"], { type: "region" });
+  const label = (cc) => { try { return names.of(cc) || cc; } catch { return cc; } };
+  countries.map(([cc, n]) => [cc, label(cc), n]).sort((a, b) => a[1].localeCompare(b[1]))
+    .forEach(([cc, name, n]) => $("country").add(new Option(`${name} (${n.toLocaleString()} hotspots)`, cc)));
+  $("country").value = countries.some(([cc]) => cc === "SG") ? "SG" : "";
+  $("release").textContent = `${meta.release || ""} · built ${meta.generatedAt.slice(0, 10)}`;
+  $("status").textContent = `${species.length.toLocaleString()} species · ${meta.hotspots.toLocaleString()} hotspots`;
+}).catch((e) => ($("status").textContent = "No data yet: " + e.message));
+</script>
+</body>
+</html>

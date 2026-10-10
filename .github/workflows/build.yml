@@ -1,0 +1,101 @@
+name: Build site from eBird data
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "EBD release, e.g. relAug-2026 (blank = newest available)"
+        required: false
+      sample_gb:
+        description: "Smoke test: only read the first N GB of the observations file (0 = everything)"
+        default: "0"
+  schedule:
+    - cron: "0 3 17 * *" # eBird publishes each release on the 15th
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      BASE: https://download.ebird.org/ebd/prepackaged
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pipeline/go.mod
+          cache: false
+
+      - name: Install fast gzip decompressor
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq isal
+
+      - name: Build aggregator
+        run: cd pipeline && go build -o ../ebdagg .
+
+      - name: Find EBD release
+        id: release
+        run: |
+          rel="${{ inputs.release }}"
+          if [ -z "$rel" ]; then
+            for back in 1 2 3 4; do
+              candidate="rel$(date -d "$(date +%Y-%m-15) -$back month" +%b-%Y)"
+              if curl -sfI "$BASE/ebd_$candidate.tar" > /dev/null; then rel=$candidate; break; fi
+            done
+          fi
+          [ -n "$rel" ] || { echo "No EBD release found"; exit 1; }
+          echo "Using $rel"
+          echo "name=$rel" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch eBird taxonomy
+        env:
+          EBIRD_API_KEY: ${{ secrets.EBIRD_API_KEY }}
+        run: curl -sSf -H "X-eBirdApiToken: $EBIRD_API_KEY" "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=json&cat=species" -o taxonomy.json
+
+      - name: Stream EBD from eBird and aggregate
+        env:
+          REL: ${{ steps.release.outputs.name }}
+          SAMPLE_GB: ${{ inputs.sample_gb || '0' }}
+        run: |
+          set -uo pipefail
+          # Both files stream straight from eBird through the decompressor; nothing is written to disk.
+          ( curl -sSf --speed-limit 1000000 --speed-time 300 "$BASE/ebd_sampling_$REL.tar" | tar -xO | igzip -dc | ./ebdagg sampling hotspots.gob \
+              || touch hotspots.gob.failed ) &
+
+          args=(observations -hotspots hotspots.gob -taxonomy taxonomy.json -out site/data -release "$REL")
+          if [ "$SAMPLE_GB" != "0" ]; then
+            # Partial read: skip the 512-byte tar header, decompress what arrives, ignore the truncated end
+            curl -sS -r "0-$((SAMPLE_GB * 1000000000))" "$BASE/ebd_$REL.tar" | tail -c +513 | { igzip -dc 2>/dev/null; true; } | ./ebdagg "${args[@]}"
+          else
+            curl -sSf --speed-limit 1000000 --speed-time 300 "$BASE/ebd_$REL.tar" | tar -xO | igzip -dc | ./ebdagg "${args[@]}"
+          fi
+          status=$?
+          wait
+          exit $status
+
+      - name: Assemble site
+        run: |
+          cp -r public/. site/
+          du -sh site site/data/*
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
