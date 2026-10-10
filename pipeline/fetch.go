@@ -13,15 +13,16 @@ import (
 )
 
 // eBird serves roughly 10 MB/s per connection, too slow to stream 250 GB inside GitHub's 6-hour
-// job limit, so fetch downloads the archive's .gz member as parallel byte ranges and writes them
-// to stdout in order.
-const chunkSize = 32 << 20
+// job limit, so fetch downloads the archive's .gz member as a few parallel byte ranges and writes
+// them to stdout in order. eBird answers bursts of requests with HTTP 429, so chunks are large
+// (few requests) and 429s are retried after the delay it asks for.
+const chunkSize = 256 << 20
 
 func runFetch(args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: ebdagg fetch URL [connections] [limit-bytes]")
 	}
-	url, conns, limit := args[0], 8, int64(0)
+	url, conns, limit := args[0], 2, int64(0)
 	if len(args) > 1 {
 		conns, _ = strconv.Atoi(args[1])
 	}
@@ -30,7 +31,7 @@ func runFetch(args []string) error {
 	}
 
 	// The .tar holds the .txt.gz first, then small metadata files we don't need
-	header, err := getRange(url, 0, 512)
+	header, _, err := getRange(url, 0, 512)
 	if err != nil {
 		return err
 	}
@@ -62,12 +63,14 @@ func runFetch(args []string) error {
 			go func() {
 				defer func() { <-sem }()
 				var r result
-				for attempt := 1; attempt <= 8; attempt++ {
-					if r.data, r.err = getRange(url, start, n); r.err == nil {
+				for attempt := 1; attempt <= 10; attempt++ {
+					var wait time.Duration
+					if r.data, wait, r.err = getRange(url, start, n); r.err == nil {
 						break
 					}
-					log.Printf("fetch: chunk %d attempt %d: %v", i, attempt, r.err)
-					time.Sleep(time.Duration(attempt*attempt) * time.Second)
+					wait = max(wait, time.Duration(attempt)*30*time.Second)
+					log.Printf("fetch: chunk %d attempt %d: %v (retrying in %s)", i, attempt, r.err, wait)
+					time.Sleep(wait)
 				}
 				slot <- r
 			}()
@@ -94,27 +97,29 @@ func runFetch(args []string) error {
 	return nil
 }
 
-var client = &http.Client{Timeout: 10 * time.Minute}
+var client = &http.Client{Timeout: 30 * time.Minute}
 
-func getRange(url string, start, n int64) ([]byte, error) {
+// getRange returns the bytes, or an error plus how long the server asked us to wait (Retry-After).
+func getRange(url string, start, n int64) ([]byte, time.Duration, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, start+n-1))
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("range %d+%d: HTTP %d", start, n, resp.StatusCode)
+		secs, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
+		return nil, time.Duration(secs) * time.Second, fmt.Errorf("range %d+%d: HTTP %d", start, n, resp.StatusCode)
 	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(resp.Body, buf); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return buf, nil
+	return buf, 0, nil
 }
 
 // tarSize decodes a tar header size field: octal text, or base-256 binary for files over 8 GB.
