@@ -58,7 +58,8 @@ jobs:
       - name: Fetch eBird taxonomy
         env:
           EBIRD_API_KEY: ${{ secrets.EBIRD_API_KEY }}
-        run: curl -sSf -H "X-eBirdApiToken: $EBIRD_API_KEY" "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=json&cat=species" -o taxonomy.json
+        run: |
+          curl -sSf -H "X-eBirdApiToken: $EBIRD_API_KEY" "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=json&cat=species" -o taxonomy.json
 
       - name: Stream EBD from eBird and aggregate
         env:
