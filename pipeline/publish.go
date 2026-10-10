@@ -28,7 +28,7 @@ const (
 	worldTopMonth   = 10  // …plus the best for each month
 	countryTop      = 25  // per species and country, all year…
 	countryTopMonth = 5   // …plus each month
-	targetsBudget   = 450 << 20
+	targetsBudget   = 350 << 20
 )
 
 type pair struct {

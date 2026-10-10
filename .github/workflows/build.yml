@@ -67,19 +67,20 @@ jobs:
           SAMPLE_GB: ${{ inputs.sample_gb || '0' }}
         run: |
           set -uo pipefail
-          # Both files stream straight from eBird through the decompressor; nothing is written to disk.
-          ( curl -sSf --speed-limit 1000000 --speed-time 300 "$BASE/ebd_sampling_$REL.tar" | tar -xO | igzip -dc | ./ebdagg sampling hotspots.gob \
+          # Both files stream straight from eBird (parallel ranges) through the decompressor; nothing is written to disk.
+          ( ./ebdagg fetch "$BASE/ebd_sampling_$REL.tar" 4 | igzip -dc | ./ebdagg sampling hotspots.gob \
               || touch hotspots.gob.failed ) &
 
           args=(observations -hotspots hotspots.gob -taxonomy taxonomy.json -out site/data -release "$REL")
           if [ "$SAMPLE_GB" != "0" ]; then
-            # Partial read: skip the 512-byte tar header, decompress what arrives, ignore the truncated end
-            curl -sS -r "0-$((SAMPLE_GB * 1000000000))" "$BASE/ebd_$REL.tar" | tail -c +513 | { igzip -dc 2>/dev/null; true; } | ./ebdagg "${args[@]}"
+            # Partial read: decompress what arrives and ignore the truncated end
+            ./ebdagg fetch "$BASE/ebd_$REL.tar" 12 "$((SAMPLE_GB * 1000000000))" | { igzip -dc 2>/dev/null || true; } | ./ebdagg "${args[@]}"
           else
-            curl -sSf --speed-limit 1000000 --speed-time 300 "$BASE/ebd_$REL.tar" | tar -xO | igzip -dc | ./ebdagg "${args[@]}"
+            ./ebdagg fetch "$BASE/ebd_$REL.tar" 12 | igzip -dc | ./ebdagg "${args[@]}"
           fi
           status=$?
           wait
+          if [ -f hotspots.gob.failed ]; then echo "::error::sampling pass failed"; exit 1; fi
           exit $status
 
       - name: Assemble site

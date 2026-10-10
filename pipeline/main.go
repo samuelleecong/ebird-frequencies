@@ -1,6 +1,7 @@
 // ebdagg turns the eBird Basic Dataset into per-hotspot, per-month species frequencies
 // and writes them as static JSON for the map page.
 //
+//	ebdagg fetch URL [connections] [limit-bytes] | igzip -dc | …   (parallel download of the .tar's .gz)
 //	<sampling.txt  ebdagg sampling hotspots.gob
 //	<ebd.txt       ebdagg observations -hotspots hotspots.gob -taxonomy taxonomy.json -out site/data
 //
@@ -41,6 +42,8 @@ func main() {
 		release := fs.String("release", "", "EBD release name, recorded in meta.json")
 		fs.Parse(os.Args[2:])
 		err = runObservations(os.Stdin, *hotspots, *taxonomy, *out, *release)
+	case "fetch":
+		err = runFetch(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
