@@ -21,14 +21,16 @@ import (
 //	countries/CC.json       [[locId, name, lat, lng, [12 checklists], has targets 0/1], ...]
 //	species/CODE.json       {"w": [[locId, name, lat, lng, CC, [12 checklists], [12 detections]], ...],
 //	                         "c": {"CC": [[locId, [12 detections]], ...]}}
-//	targets/LOCID.json      {"n": [12 checklists], "s": [[code, [12 detections]], ...]}
+//	targets/LOCID.json      {"n": [12 checklists], "s": [[code, [12 detections]], ...]}   busiest hotspots, by month
+//	                        {"n": [12 checklists], "a": [[code, detections], ...]}        the rest, year-round only
 const (
-	minChecklists   = 5   // hotspot-periods with fewer complete checklists are too noisy to rank
-	worldTop        = 100 // per species, best hotspots worldwide (all year)…
-	worldTopMonth   = 10  // …plus the best for each month
-	countryTop      = 25  // per species and country, all year…
-	countryTopMonth = 5   // …plus each month
-	targetsBudget   = 350 << 20
+	minChecklists   = 5         // hotspot-periods with fewer complete checklists are too noisy to rank
+	worldTop        = 100       // per species, best hotspots worldwide (all year)…
+	worldTopMonth   = 10        // …plus the best for each month
+	countryTop      = 25        // per species and country, all year…
+	countryTopMonth = 5         // …plus each month
+	monthlyBudget   = 300 << 20 // month-by-month species lists for the busiest hotspots…
+	targetsBudget   = 640 << 20 // …then compact year-round lists for every other hotspot that fits
 )
 
 type pair struct {
@@ -162,7 +164,9 @@ func topUnion(pairs []pair, nYear, nMonth int) []pair {
 	return result
 }
 
-// writeTargets writes full species lists for the busiest hotspots until the size budget is used.
+// writeTargets writes a species list for every rankable hotspot, busiest first: by month while
+// the monthly budget lasts (quiet hotspots have too few checklists per month to mean much anyway),
+// then year-round totals only, until the overall budget is used.
 func writeTargets(w *writer, byHotspot map[*Hotspot][]pair) map[*Hotspot]bool {
 	order := make([]*Hotspot, 0, len(byHotspot))
 	for h := range byHotspot {
@@ -171,19 +175,41 @@ func writeTargets(w *writer, byHotspot map[*Hotspot][]pair) map[*Hotspot]bool {
 	sort.Slice(order, func(i, j int) bool { return sum(&order[i].Checklists) > sum(&order[j].Checklists) })
 	done := map[*Hotspot]bool{}
 	var used int64
+	monthly, yearly := 0, 0
 	for _, h := range order {
 		ps := byHotspot[h]
 		sort.Slice(ps, func(i, j int) bool { return sum(ps[i].months) > sum(ps[j].months) })
-		s := make([][]any, len(ps))
-		for i, p := range ps {
-			s[i] = []any{p.code, *p.months}
+		var file map[string]any
+		if used < monthlyBudget {
+			s := make([][]any, len(ps))
+			for i, p := range ps {
+				s[i] = []any{p.code, *p.months}
+			}
+			file = map[string]any{"n": h.Checklists, "s": s}
+		} else {
+			a := make([][]any, len(ps))
+			for i, p := range ps {
+				a[i] = []any{p.code, sum(p.months)}
+			}
+			file = map[string]any{"n": h.Checklists, "a": a}
 		}
-		n := w.json("targets/"+h.ID+".json", map[string]any{"n": h.Checklists, "s": s})
-		if used += n; used > targetsBudget {
+		b, err := json.Marshal(file)
+		if err != nil {
+			w.err = err
 			break
 		}
+		if used+int64(len(b)) > targetsBudget {
+			break
+		}
+		used += w.write("targets/"+h.ID+".json", b)
 		done[h] = true
+		if _, ok := file["s"]; ok {
+			monthly++
+		} else {
+			yearly++
+		}
 	}
+	log.Printf("publish: species lists for %d of %d hotspots (%d by month, %d year-round)", len(done), len(order), monthly, yearly)
 	return done
 }
 
@@ -222,11 +248,21 @@ func (w *writer) json(rel string, v any) int64 {
 		return 0
 	}
 	b, err := json.Marshal(v)
+	if err != nil {
+		w.err = err
+		return 0
+	}
+	return w.write(rel, b)
+}
+
+func (w *writer) write(rel string, b []byte) int64 {
+	if w.err != nil {
+		return 0
+	}
+	path := filepath.Join(w.root, rel)
+	err := os.MkdirAll(filepath.Dir(path), 0o755)
 	if err == nil {
-		path := filepath.Join(w.root, rel)
-		if err = os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
-			err = os.WriteFile(path, b, 0o644)
-		}
+		err = os.WriteFile(path, b, 0o644)
 	}
 	w.err = err
 	w.sizes[strings.SplitN(rel, "/", 2)[0]] += int64(len(b))

@@ -553,16 +553,20 @@ async function renderSpot(token) {
   resultLayer.clearLayers();
   L.marker([h.lat, h.lng], { icon: L.divIcon({ className: "", html: `<div class="pin gold" style="--i:0"><span>★</span></div>`, iconSize: [30, 30], iconAnchor: [15, 36] }) }).addTo(resultLayer);
 
-  const n = inMonths(t ? t.n : h.n, state.months);
-  const birds = t ? t.s
-    .map(([code, k]) => {
+  // Quieter hotspots only have year-round totals ("a"); busy ones have every month ("s")
+  const yearOnly = !!t && !t.s;
+  const months = yearOnly ? [] : state.months;
+  const n = inMonths(t ? t.n : h.n, months);
+  const counts = !t ? [] : t.s
+    ? t.s.map(([code, k]) => ({ code, K: inMonths(k, months), monthly: k.map((v, m) => (t.n[m] ? v / t.n[m] : 0)) }))
+    : t.a.map(([code, K]) => ({ code, K, monthly: null }));
+  const birds = counts
+    .map(({ code, K, monthly }) => {
       const sp = idx.byCode.get(code);
-      const K = inMonths(k, state.months);
-      const monthly = k.map((v, m) => (t.n[m] ? v / t.n[m] : 0));
       return sp && { ...sp, monthly, f: n ? K / n : 0, seen: life.isSeen(code) };
     })
     .filter((b) => b && b.f > 0)
-    .sort((a, b) => b.f - a.f) : [];
+    .sort((a, b) => b.f - a.f);
   const hasList = life.hasList();
   const targets = birds.filter((b) => !b.seen);
   const showTargets = hasList && !state.showAll;
@@ -575,7 +579,7 @@ async function renderSpot(token) {
     ${back ? `<button class="back" data-species="${back.code}">← ${esc(back.com)}</button>` : ""}
     <div class="spot-head">
       <h2>${esc(h.name)}</h2>
-      <div class="muted">${flag(h.cc)} ${esc(countryName(h.cc))} · ${n.toLocaleString()} checklists ${esc(inWhen())}</div>
+      <div class="muted">${flag(h.cc)} ${esc(countryName(h.cc))} · ${n.toLocaleString()} checklists ${yearOnly ? "year-round" : esc(inWhen())}</div>
       <div class="btn-row">
         <a class="btn" href="https://ebird.org/hotspot/${h.id}" target="_blank" rel="noopener">eBird ↗</a>
         <a class="btn" href="https://www.google.com/maps/dir/?api=1&destination=${h.lat},${h.lng}" target="_blank" rel="noopener">🧭 Directions</a>
@@ -593,6 +597,7 @@ async function renderSpot(token) {
     <h3>${showTargets ? "Your targets" : "Birds here"} <span class="seg">
       <button data-act="targets" aria-pressed="${showTargets}" ${hasList ? "" : "disabled title='Add your life list first'"}>My targets</button>
       <button data-act="all" aria-pressed="${!showTargets}">All birds</button></span></h3>
+    ${yearOnly && state.months.length ? `<div class="callout">Too few checklists here to split by month, so these are <b>year-round</b> numbers.</div>` : ""}
     ${!hasList ? `<div class="callout">Add your eBird life list and this becomes <b>your</b> target list, with every bird you still need.</div>` : ""}
     ${showTargets && !targets.some((b) => b.f >= 0.01) ? `<div class="celebrate"><span class="big">🎉</span>You've seen every species above 1% here${state.months.length ? ` ${esc(inWhen())}` : ""}!</div>` : ""}
     <ol class="list targets">${list.slice(0, state.showMore ? 400 : 60).map((b, i) => targetRow(b, i)).join("")}</ol>
@@ -665,12 +670,12 @@ async function fillSpotLive(token, h) {
 }
 
 function targetRow(b, i) {
-  const peak = Math.max(...b.monthly) || 1;
-  const spark = b.monthly.map((v, m) => `<i style="--h:${v / peak}" class="${!state.months.length || state.months.includes(m + 1) ? "on" : ""}"></i>`).join("");
+  const peak = b.monthly ? Math.max(...b.monthly) || 1 : 1;
+  const spark = b.monthly ? `<span class="spark" title="Reports by month">${b.monthly.map((v, m) => `<i style="--h:${v / peak}" class="${!state.months.length || state.months.includes(m + 1) ? "on" : ""}"></i>`).join("")}</span>` : "";
   return `<li class="row ${b.seen ? "is-seen" : ""}" style="--i:${Math.min(i, 20)}" data-species="${b.code}">
     ${thumbHTML(b.sci)}
     <span class="row-main"><div class="row-title">${esc(b.com)}</div>
-      <div class="row-sub"><span class="spark" title="Reports by month">${spark}</span> ${odds(b.f)} <span data-live-code="${b.code}" hidden></span></div></span>
+      <div class="row-sub">${spark} ${odds(b.f)} <span data-live-code="${b.code}" hidden></span></div></span>
     <span class="row-end"><span class="pct">${pct(b.f)}</span>
       <button class="seen-btn ${b.seen ? "on" : ""}" data-seen="${b.code}" aria-label="${b.seen ? "Seen" : "Mark as seen"}" title="${b.seen ? "On your life list" : "Tick off as seen"}">${b.seen ? "✓" : "○"}</button></span>
     <span class="bar ${b.seen ? "" : "coral"}"><i style="--w:${Math.min(1, b.f / 0.6)}"></i></span>
@@ -778,13 +783,14 @@ async function fillHuntLive(token) {
 }
 
 function scoreHunt(h, t) {
-  const n = inMonths(t.n, state.months);
+  const months = t.s ? state.months : []; // year-round-only lists can't be split by month
+  const n = inMonths(t.n, months);
   if (n < MIN_CHECKLISTS) return null;
   let expected = 0;
   const lifers = [];
-  for (const [code, k] of t.s) {
+  for (const [code, k] of t.s || t.a) {
     if (life.isSeen(code)) continue;
-    const f = inMonths(k, state.months) / n;
+    const f = (t.s ? inMonths(k, months) : k) / n;
     if (f <= 0) continue;
     expected += f;
     lifers.push([code, f]);
