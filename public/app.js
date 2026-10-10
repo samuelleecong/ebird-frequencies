@@ -1,6 +1,7 @@
 import { MONTHS, MONTHS_LONG, alphaCode, countryIndex, hotspotTargets, inMonths, load, searchSpecies, speciesIndex, speciesSpots, wilson } from "./data.js";
 import { heroInfo, hydrateThumbs, loadThumbs, thumbHTML } from "./photos.js";
 import * as life from "./lifelist.js";
+import { ago, freshness, live } from "./live.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -117,6 +118,7 @@ map.on("locationerror", () => {
 
 const dotsLayer = L.layerGroup().addTo(map);
 const resultLayer = L.layerGroup().addTo(map);
+const liveLayer = L.layerGroup().addTo(map); // recent eBird reports
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
 function mapPadding() {
@@ -319,6 +321,7 @@ const view = $("#view");
 function render() {
   const token = ++renderToken;
   resultLayer.clearLayers();
+  liveLayer.clearLayers();
   drawDots();
   if (state.tab === "find") return renderFind(token);
   if (state.tab === "spot") return renderSpot(token);
@@ -433,7 +436,7 @@ async function renderFind(token) {
       <div>
         <h2>${esc(s.com)}</h2>
         <div class="sci">${esc(s.sci)}</div>
-        <div class="badges">${seen} <span class="chip code" title="4-letter code">${alphaCode(s.com)}</span>
+        <div class="badges">${seen} <span id="live-badge"></span> <span class="chip code" title="4-letter code">${alphaCode(s.com)}</span>
           <a class="chip code" href="https://ebird.org/species/${s.code}" target="_blank" rel="noopener">eBird ↗</a></div>
       </div>
     </div>
@@ -448,7 +451,7 @@ async function renderFind(token) {
       <li class="row" style="--i:${i}" data-spot="${h.id}" data-from="${s.code}">
         <span class="rank">${i + 1}</span>
         <span class="row-main"><div class="row-title">${esc(h.name)}</div>
-          <div class="row-sub">${dots(h.N)} ${h.K.toLocaleString()} of ${h.N.toLocaleString()} checklists${state.cc ? "" : ` · ${flag(h.cc)}`}</div></span>
+          <div class="row-sub">${dots(h.N)} ${h.K.toLocaleString()} of ${h.N.toLocaleString()} checklists${state.cc ? "" : ` · ${flag(h.cc)}`} <span data-live-loc="${h.id}" hidden></span></div></span>
         <span class="pct">${pct(h.f)}<small>${odds(h.f).replace("on ", "")}</small></span>
         <span class="bar"><i style="--w:${h.f / rows[0].f}"></i></span>
       </li>`).join("")}</ol>
@@ -457,7 +460,8 @@ async function renderFind(token) {
         <div class="btn-row" style="justify-content:center">
           ${state.months.length ? `<button class="btn" data-act="allyear">Try all year</button>` : ""}
           ${state.cc ? `<button class="btn primary" data-act="world">Search the whole world</button>` : ""}
-        </div></div>`}`;
+        </div></div>`}
+    <div id="live-species"></div>`;
 
   drawResults(rows, (h) => h.f, {
     label: (h) => `${esc(h.name)} · ${pct(h.f)}`,
@@ -471,6 +475,41 @@ async function renderFind(token) {
     if (info.photo && img) { img.src = info.photo.url; $("#hero-credit").textContent = info.photo.credit; }
     if (info.extract) $("#blurb").innerHTML = `${esc(info.extract)} <a href="${info.wiki}" target="_blank" rel="noopener">More</a>`;
   });
+  fillSpeciesLive(token, s);
+}
+
+/** Where the species has actually been reported in the last 30 days. */
+async function fillSpeciesLive(token, s) {
+  if (!state.cc) return;
+  const obs = await live("species", { region: state.cc, species: s.code });
+  if (token !== renderToken || !obs?.length) return;
+  obs.sort((a, b) => b.date.localeCompare(a.date));
+  $("#live-badge").innerHTML = `<span class="chip live ${freshness(obs[0].date)}" title="Latest eBird report in ${esc(placeName())}">● Seen ${ago(obs[0].date)}</span>`;
+  const byLoc = new Map();
+  for (const o of obs) if (o.loc && !byLoc.has(o.loc)) byLoc.set(o.loc, o);
+  document.querySelectorAll("[data-live-loc]").forEach((el) => {
+    const o = byLoc.get(el.dataset.liveLoc);
+    if (o) Object.assign(el, { hidden: false, className: `live-chip ${freshness(o.date)}`, textContent: `● ${ago(o.date)}`, title: "Latest report here" });
+  });
+  $("#live-species").innerHTML = `<h3>Reported lately <small>last 30 days · ${obs.length} location${obs.length > 1 ? "s" : ""}</small></h3>
+    <ol class="list">${obs.slice(0, 6).map((o, i) => liveRow(o, i, o.name || "Private location", o.count ? `${o.count} seen` : "")).join("")}</ol>`;
+  drawLive(obs, (o) => `${esc(o.name || "Private location")} · ${ago(o.date)}`);
+}
+
+function liveRow(o, i, title, extra) {
+  const target = o.loc && regionSpots.some((h) => h.id === o.loc) ? `data-spot="${o.loc}"` : `data-fly="${o.lat},${o.lng}"`;
+  return `<li class="row live-row" style="--i:${i}" ${target}>
+    <span class="live-dot ${freshness(o.date)}"></span>
+    <span class="row-main"><div class="row-title">${esc(title)}</div><div class="row-sub">${esc(ago(o.date))}${extra ? ` · ${esc(extra)}` : ""}</div></span>
+    <span class="muted">${esc(o.date.slice(5, 10).replace("-", "/"))}</span></li>`;
+}
+
+function drawLive(obs, label) {
+  liveLayer.clearLayers();
+  for (const o of obs.slice(0, 200)) {
+    L.marker([o.lat, o.lng], { icon: L.divIcon({ className: "", html: `<span class="pulse ${freshness(o.date)}"></span>`, iconSize: [14, 14], iconAnchor: [7, 7] }), zIndexOffset: -100 })
+      .bindTooltip(label(o)).addTo(liveLayer);
+  }
 }
 
 /* ---- Hotspot ---- */
@@ -545,6 +584,7 @@ async function renderSpot(token) {
         <div class="stat coral"><b>${hasList ? targets.length : "—"}</b><span>${hasList ? "of them lifers" : "add life list"}</span></div>
         <div class="stat coral"><b>${hasList ? expected.toFixed(1) : "—"}</b><span>lifers per visit</span></div>
       </div>` : ""}
+      <div id="live-spot"></div>
     </div>
     ${!t ? `<div class="empty-state"><span class="big">📒</span>A full species list is only published for the busiest hotspots. Open it on eBird for more.</div>`
     : `
@@ -557,6 +597,23 @@ async function renderSpot(token) {
     ${list.length > 60 && !state.showMore ? `<div class="btn-row" style="justify-content:center"><button class="btn" data-act="more">Show all ${list.length}</button></div>` : ""}
     <p class="hint">Frequency = share of complete checklists ${esc(inWhen())} that reported the bird. Tap a bird to see where else it's easiest; tap ○ to tick it off.</p>`}`;
   hydrateThumbs(view);
+  fillSpotLive(token, h);
+}
+
+/** Which birds were actually reported here in the last 30 days. */
+async function fillSpotLive(token, h) {
+  const obs = await live("hotspot", { loc: h.id });
+  if (token !== renderToken || !obs?.length) return;
+  const latest = new Map();
+  for (const o of obs) if (!latest.has(o.code) || latest.get(o.code) < o.date) latest.set(o.code, o.date);
+  document.querySelectorAll("[data-live-code]").forEach((el) => {
+    const d = latest.get(el.dataset.liveCode);
+    if (d) Object.assign(el, { hidden: false, className: `live-chip ${freshness(d)}`, textContent: `● here ${ago(d)}`, title: "Latest eBird report at this hotspot" });
+  });
+  const newest = [...latest.values()].sort().pop();
+  const lifers = life.hasList() ? [...latest.keys()].filter((c) => !life.isSeen(c) && idx.byCode.has(c)) : [];
+  $("#live-spot").innerHTML = `<div class="live-banner"><span class="live-dot ${freshness(newest)}"></span>
+    <span><b>${latest.size} species</b> reported here in the last 30 days, latest ${ago(newest)}${lifers.length ? `, including <b>${lifers.length} of your targets</b>` : ""}.</span></div>`;
 }
 
 function targetRow(b, i) {
@@ -565,7 +622,7 @@ function targetRow(b, i) {
   return `<li class="row ${b.seen ? "is-seen" : ""}" style="--i:${Math.min(i, 20)}" data-species="${b.code}">
     ${thumbHTML(b.sci)}
     <span class="row-main"><div class="row-title">${esc(b.com)}</div>
-      <div class="row-sub"><span class="spark" title="Reports by month">${spark}</span> ${odds(b.f)}</div></span>
+      <div class="row-sub"><span class="spark" title="Reports by month">${spark}</span> ${odds(b.f)} <span data-live-code="${b.code}" hidden></span></div></span>
     <span class="row-end"><span class="pct">${pct(b.f)}</span>
       <button class="seen-btn ${b.seen ? "on" : ""}" data-seen="${b.code}" aria-label="${b.seen ? "Seen" : "Mark as seen"}" title="${b.seen ? "On your life list" : "Tick off as seen"}">${b.seen ? "✓" : "○"}</button></span>
     <span class="bar ${b.seen ? "" : "coral"}"><i style="--w:${Math.min(1, b.f / 0.6)}"></i></span>
@@ -604,12 +661,14 @@ async function renderHunt(token) {
 
   view.innerHTML = `
     ${!hasList ? `<div class="callout"><b>Tip:</b> add your eBird life list and this ranks hotspots by birds <i>you</i> haven't seen. For now it counts every species.</div>` : ""}
+    <div id="live-hunt"></div>
     <h2>Lifer hunt ${esc(inWhen())}</h2>
     <p class="muted" style="margin:4px 0 0">Expected ${hasList ? "new birds" : "species"} per visit: the sum of each ${hasList ? "unseen " : ""}bird's frequency, across the ${pool.length} busiest hotspots ${inView ? "in this map view" : `in ${esc(countryName(state.cc))}`}.</p>
     <div class="btn-row"><button class="btn" data-act="hunt-area">🔄 Search this map area</button></div>
     <div class="progress" id="hunt-progress"><i style="--p:0"></i></div>
     <ol class="list" id="hunt-list"></ol>`;
 
+  if (hasList) fillHuntLive(token);
   const key = `${state.cc}|${state.months}|${life.version()}|${pool.map((h) => h.id).join(",")}`;
   let results = huntCache.get(key);
   if (!results) {
@@ -642,6 +701,32 @@ async function renderHunt(token) {
   }
   $("#hunt-progress")?.remove();
   showHunt(results, true);
+}
+
+/** Birds you still need that someone reported in the region in the last two weeks. */
+async function fillHuntLive(token) {
+  const obs = await live("region", { region: state.cc });
+  if (token !== renderToken || !obs) return;
+  const fresh = obs.filter((o) => !life.isSeen(o.code) && idx.byCode.has(o.code)).sort((a, b) => b.date.localeCompare(a.date));
+  const box = $("#live-hunt");
+  if (!box) return;
+  if (!fresh.length) {
+    box.innerHTML = `<div class="live-banner"><span class="live-dot cool"></span><span>None of the ${obs.length} species reported in ${esc(countryName(state.cc))} in the last 2 weeks are new for you.</span></div>`;
+    return;
+  }
+  const shown = state.showAllFresh ? fresh : fresh.slice(0, 5);
+  box.innerHTML = `<h2>Fresh lifers <small class="muted" style="font:500 13px var(--sans)">reported in the last 2 weeks</small></h2>
+    <ol class="list" style="margin:10px 0 6px">${shown.map((o, i) => {
+      const sp = idx.byCode.get(o.code);
+      return `<li class="row targets-row" style="--i:${i};grid-template-columns:44px 1fr auto" data-species="${o.code}">
+        ${thumbHTML(sp.sci)}<span class="row-main"><div class="row-title">${esc(sp.com)}</div>
+        <div class="row-sub"><span class="live-chip ${freshness(o.date)}">● ${ago(o.date)}</span> ${esc(o.name || "a private location")}</div></span>
+        <span class="chip lifer">lifer</span></li>`;
+    }).join("")}</ol>
+    ${fresh.length > 5 && !state.showAllFresh ? `<button class="btn" data-act="fresh">Show all ${fresh.length}</button>` : ""}
+    <hr class="divider">`;
+  hydrateThumbs(box);
+  drawLive(fresh, (o) => `${esc(idx.byCode.get(o.code).com)} · ${ago(o.date)}`);
 }
 
 function scoreHunt(h, t) {
@@ -716,6 +801,7 @@ view.addEventListener("click", async (e) => {
   if (act === "targets" || act === "all") { state.showAll = act === "all"; state.showMore = false; return render(); }
   if (act === "more") { state.showMore = true; return render(); }
   if (act === "hunt-area") { huntCache.clear(); return render(); }
+  if (act === "fresh") { state.showAllFresh = true; return render(); }
   if (act === "fav") {
     const favs = favorites();
     const h = await findSpot(state.spot);
@@ -725,6 +811,8 @@ view.addEventListener("click", async (e) => {
     toast(favs[state.spot] ? "♥ Saved" : "Removed from saved");
     return render();
   }
+  const fly = e.target.closest("[data-fly]");
+  if (fly) { const [lat, lng] = fly.dataset.fly.split(",").map(Number); return flyToSpot({ lat, lng }, 13); }
   const sp = e.target.closest("[data-species]");
   if (sp) return chooseSpecies(sp.dataset.species);
   const spot = e.target.closest("[data-spot]");

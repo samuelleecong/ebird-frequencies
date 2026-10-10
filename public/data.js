@@ -1,6 +1,6 @@
 // Static data published by the monthly pipeline (see pipeline/publish.go for the layout).
-const local = ["localhost", "127.0.0.1"].includes(location.hostname);
-const BASE = local ? "https://samuelleecong.github.io/ebird-frequencies/data/" : "data/";
+// The data lives on GitHub Pages (free, built monthly by GitHub Actions); the app itself can be served from anywhere
+const BASE = location.hostname.endsWith("github.io") ? "data/" : "https://samuelleecong.github.io/ebird-frequencies/data/";
 
 const cache = new Map();
 

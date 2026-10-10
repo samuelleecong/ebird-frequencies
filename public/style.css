@@ -237,6 +237,25 @@ img.thumb { animation: fadein .4s ease; }
 .locate-btn.busy { animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 50% { color: #3b82f6; transform: scale(1.1); } }
 
+/* live eBird reports */
+.live-chip, .chip.live { font-size: 11px; font-weight: 700; white-space: nowrap; }
+.live-chip.hot, .chip.live.hot { color: #1f9d55; }
+.live-chip.warm, .chip.live.warm { color: #c98a12; }
+.live-chip.cool, .chip.live.cool { color: var(--muted); }
+.chip.live { background: var(--card-2); }
+.live-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; justify-self: center; }
+.live-dot.hot { background: #22c55e; box-shadow: 0 0 0 0 rgba(34,197,94,.6); animation: ping 1.8s infinite; }
+.live-dot.warm { background: #e9a91d; }
+.live-dot.cool { background: var(--muted); }
+@keyframes ping { 70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
+.live-banner { display: flex; gap: 10px; align-items: center; margin-top: 12px; padding: 10px 12px; border-radius: 14px; background: var(--card); border: 1px solid var(--line); font-size: 13px; }
+.live-row { grid-template-columns: 30px 1fr auto; }
+.divider { border: 0; border-top: 1px dashed var(--line); margin: 18px 0 14px; }
+.pulse { display: block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.pulse.hot { background: #22c55e; animation: ping 1.8s infinite; }
+.pulse.warm { background: #e9a91d; }
+.pulse.cool { background: #9aa39d; }
+
 /* map markers */
 .pin { width: 30px; height: 30px; border-radius: 50% 50% 50% 4px; transform: rotate(-45deg); display: grid; place-items: center; background: var(--moss); border: 2.5px solid #fff; box-shadow: 0 4px 10px rgba(0,0,0,.25); animation: drop .45s cubic-bezier(.3,1.5,.5,1) both; animation-delay: calc(var(--i) * 40ms); }
 .pin span { transform: rotate(45deg); color: #fff; font: 700 13px var(--serif); }
