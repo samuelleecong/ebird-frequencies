@@ -588,7 +588,7 @@ async function renderSpot(token) {
       </div>` : ""}
       <div id="live-spot"></div>
     </div>
-    ${!t ? `<div class="empty-state"><span class="big">📒</span>A full species list is only published for the busiest hotspots. Open it on eBird for more.</div>`
+    ${!t ? `<div id="spplist"><div class="skeleton" style="margin-top:14px"></div><div class="skeleton" style="margin-top:8px"></div></div>`
     : `
     <h3>${showTargets ? "Your targets" : "Birds here"} <span class="seg">
       <button data-act="targets" aria-pressed="${showTargets}" ${hasList ? "" : "disabled title='Add your life list first'"}>My targets</button>
@@ -599,7 +599,53 @@ async function renderSpot(token) {
     ${list.length > 60 && !state.showMore ? `<div class="btn-row" style="justify-content:center"><button class="btn" data-act="more">Show all ${list.length}</button></div>` : ""}
     <p class="hint">Frequency = share of complete checklists ${esc(inWhen())} that reported the bird. Tap a bird to see where else it's easiest; tap ○ to tick it off.</p>`}`;
   hydrateThumbs(view);
-  fillSpotLive(token, h);
+  if (t) fillSpotLive(token, h);
+  else fillSpeciesList(token, h);
+}
+
+/**
+ * Quiet hotspots have no published frequencies, so fall back to eBird's list of every species
+ * ever recorded there, with the ones reported in the last 30 days first.
+ */
+async function fillSpeciesList(token, h) {
+  const [codes, recent] = await Promise.all([live("spplist", { loc: h.id }), live("hotspot", { loc: h.id })]);
+  const box = $("#spplist");
+  if (token !== renderToken || !box) return;
+  if (!codes) {
+    box.innerHTML = `<div class="empty-state"><span class="big">📒</span>Too few checklists here for frequencies. <a href="https://ebird.org/hotspot/${h.id}" target="_blank" rel="noopener">See it on eBird</a>.</div>`;
+    return;
+  }
+  const latest = new Map();
+  for (const o of recent || []) if (!latest.has(o.code) || latest.get(o.code) < o.date) latest.set(o.code, o.date);
+  const hasList = life.hasList();
+  const birds = codes.map((code, order) => {
+    const sp = idx.byCode.get(code);
+    return sp && { ...sp, order, seen: life.isSeen(code), date: latest.get(code) };
+  }).filter(Boolean)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || "") || a.order - b.order);
+  const targets = birds.filter((b) => !b.seen);
+  const showTargets = hasList && !state.showAll;
+  const list = showTargets ? targets : birds;
+  box.innerHTML = `
+    <div class="stats">
+      <div class="stat"><b>${birds.length}</b><span>species ever recorded</span></div>
+      <div class="stat coral"><b>${hasList ? targets.length : "—"}</b><span>${hasList ? "of them lifers" : "add life list"}</span></div>
+      <div class="stat"><b>${latest.size}</b><span>reported in last 30 days</span></div>
+    </div>
+    <div class="callout" style="margin-top:12px">Only ${inMonths(h.n, []).toLocaleString()} complete checklists here, too few for reliable percentages, so this is <b>every species ever recorded</b> on eBird. Ones reported in the last 30 days come first.</div>
+    <h3>${showTargets ? "Your targets" : "Birds recorded here"} <span class="seg">
+      <button data-act="targets" aria-pressed="${showTargets}" ${hasList ? "" : "disabled title='Add your life list first'"}>My targets</button>
+      <button data-act="all" aria-pressed="${!showTargets}">All birds</button></span></h3>
+    ${showTargets && !targets.length ? `<div class="celebrate"><span class="big">🎉</span>You've seen every species ever recorded here!</div>` : ""}
+    <ol class="list targets">${list.slice(0, state.showMore ? 1000 : 60).map((b, i) => `
+      <li class="row ${b.seen ? "is-seen" : ""}" style="--i:${Math.min(i, 20)}" data-species="${b.code}">
+        ${thumbHTML(b.sci)}
+        <span class="row-main"><div class="row-title">${esc(b.com)}</div>
+          <div class="row-sub">${b.date ? `<span class="live-chip ${freshness(b.date)}">● here ${ago(b.date)}</span>` : "recorded here"}${hasList && !b.seen ? ` <span class="chip lifer">lifer</span>` : ""}</div></span>
+        <span class="row-end"><button class="seen-btn ${b.seen ? "on" : ""}" data-seen="${b.code}" aria-label="${b.seen ? "Seen" : "Mark as seen"}">${b.seen ? "✓" : "○"}</button></span>
+      </li>`).join("")}</ol>
+    ${list.length > 60 && !state.showMore ? `<div class="btn-row" style="justify-content:center"><button class="btn" data-act="more">Show all ${list.length}</button></div>` : ""}`;
+  hydrateThumbs(box);
 }
 
 /** Which birds were actually reported here in the last 30 days. */
