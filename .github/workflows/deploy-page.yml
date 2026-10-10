@@ -1,0 +1,57 @@
+name: Deploy page changes
+
+# Redeploys public/ on top of the data from the most recent build, so page tweaks
+# don't need the 4-hour eBird run.
+on:
+  push:
+    branches: [main]
+    paths: ["public/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the site from the last deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=github-pages&per_page=50" \
+            --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty')
+          if [ -z "$id" ]; then echo "::error::No site artifact left to reuse; run 'Build site from eBird data' instead"; exit 1; fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > site.zip
+          unzip -q site.zip && mkdir site && tar -xf artifact.tar -C site && rm site.zip artifact.tar
+          test -f site/data/meta.json
+
+      - name: Swap in the current page
+        run: |
+          find site -maxdepth 1 -type f -delete
+          cp -r public/. site/
+          du -sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+          retention-days: 90
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

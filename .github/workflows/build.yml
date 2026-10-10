@@ -87,6 +87,7 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          retention-days: 90 # deploy-page.yml reuses this data when only the page changes
 
   deploy:
     needs: build
