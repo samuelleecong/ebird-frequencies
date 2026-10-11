@@ -9,6 +9,9 @@ on:
       sample_gb:
         description: "Smoke test: only read the first N GB of the observations file (0 = everything)"
         default: "0"
+      stop_after:
+        description: "How long each part runs before handing over (testing: e.g. 4m)"
+        default: "5h15m"
   schedule:
     - cron: "0 3 17 * *" # eBird publishes each release on the 15th
 
@@ -22,27 +25,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  prep:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
-    env:
-      BASE: https://download.ebird.org/ebd/prepackaged
+    outputs:
+      release: ${{ steps.release.outputs.name }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: pipeline/go.mod
-          cache: false
-
-      - name: Install fast gzip decompressor
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq isal
-
-      - name: Build aggregator
-        run: cd pipeline && go build -o ../ebdagg .
-
       - name: Find EBD release
         id: release
+        env:
+          BASE: https://download.ebird.org/ebd/prepackaged
         run: |
           rel="${{ inputs.release }}"
           if [ -z "$rel" ]; then
@@ -55,29 +46,69 @@ jobs:
           echo "Using $rel"
           echo "name=$rel" >> "$GITHUB_OUTPUT"
 
+  # eBird's download speed varies from run to run (3–17 MB/s for ~250 GB), so the build runs in
+  # up to four ~5-hour parts, each resuming where the last one paused.
+  part1:
+    needs: prep
+    uses: ./.github/workflows/build-part.yml
+    with: { part: 1, release: "${{ needs.prep.outputs.release }}", sample_gb: "${{ inputs.sample_gb || '0' }}", stop_after: "${{ inputs.stop_after || '5h15m' }}" }
+  part2:
+    needs: [prep, part1]
+    if: needs.part1.outputs.done != 'true'
+    uses: ./.github/workflows/build-part.yml
+    with: { part: 2, resume_from: state-1, release: "${{ needs.prep.outputs.release }}", sample_gb: "${{ inputs.sample_gb || '0' }}", stop_after: "${{ inputs.stop_after || '5h15m' }}" }
+  part3:
+    needs: [prep, part2]
+    if: needs.part2.outputs.done != 'true'
+    uses: ./.github/workflows/build-part.yml
+    with: { part: 3, resume_from: state-2, release: "${{ needs.prep.outputs.release }}", sample_gb: "${{ inputs.sample_gb || '0' }}", stop_after: "${{ inputs.stop_after || '5h15m' }}" }
+  part4:
+    needs: [prep, part3]
+    if: needs.part3.outputs.done != 'true'
+    uses: ./.github/workflows/build-part.yml
+    with: { part: 4, resume_from: state-3, release: "${{ needs.prep.outputs.release }}", sample_gb: "${{ inputs.sample_gb || '0' }}", stop_after: "${{ inputs.stop_after || '5h15m' }}" }
+
+  publish:
+    needs: [prep, part1, part2, part3, part4]
+    if: always() && contains(join(needs.*.outputs.done, ','), 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pipeline/go.mod
+          cache: false
+
+      - name: Build aggregator
+        run: cd pipeline && go build -o ../ebdagg .
+
+      - name: Which part finished
+        id: which
+        run: |
+          for p in 1 2 3 4; do
+            done_var="DONE_$p"
+            if [ "${!done_var}" = true ]; then echo "artifact=state-$p" >> "$GITHUB_OUTPUT"; echo "part $p finished"; break; fi
+          done
+        env:
+          DONE_1: ${{ needs.part1.outputs.done }}
+          DONE_2: ${{ needs.part2.outputs.done }}
+          DONE_3: ${{ needs.part3.outputs.done }}
+          DONE_4: ${{ needs.part4.outputs.done }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.which.outputs.artifact }}
+          path: state
+
       - name: Fetch eBird taxonomy
         env:
           EBIRD_API_KEY: ${{ secrets.EBIRD_API_KEY }}
         run: |
           curl -sSf -H "X-eBirdApiToken: $EBIRD_API_KEY" "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=json&cat=species" -o taxonomy.json
 
-      - name: Stream EBD from eBird and aggregate
-        env:
-          REL: ${{ steps.release.outputs.name }}
-          SAMPLE_GB: ${{ inputs.sample_gb || '0' }}
-        run: |
-          set -euo pipefail
-          # Both files stream straight from eBird through the decompressor; nothing is written to disk.
-          # One file at a time over 2 connections: eBird rate-limits (HTTP 429) anything busier.
-          ./ebdagg fetch "$BASE/ebd_sampling_$REL.tar" 2 | igzip -dc | ./ebdagg sampling hotspots.gob
-
-          args=(observations -hotspots hotspots.gob -taxonomy taxonomy.json -out site/data -release "$REL")
-          if [ "$SAMPLE_GB" != "0" ]; then
-            # Partial read: decompress what arrives and ignore the truncated end
-            ./ebdagg fetch "$BASE/ebd_$REL.tar" 2 "$((SAMPLE_GB * 1000000000))" | { igzip -dc 2>/dev/null || true; } | ./ebdagg "${args[@]}"
-          else
-            ./ebdagg fetch "$BASE/ebd_$REL.tar" 2 | igzip -dc | ./ebdagg "${args[@]}"
-          fi
+      - name: Write site data
+        run: ./ebdagg publish -state state -taxonomy taxonomy.json -out site/data -release "${{ needs.prep.outputs.release }}"
 
       - name: Assemble site
         run: |
@@ -90,7 +121,7 @@ jobs:
           retention-days: 90 # deploy-page.yml reuses this data when only the page changes
 
   deploy:
-    needs: build
+    needs: publish
     runs-on: ubuntu-latest
     environment:
       name: github-pages

@@ -1,100 +1,96 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// eBird serves roughly 10 MB/s per connection, too slow to stream 250 GB inside GitHub's 6-hour
-// job limit, so fetch downloads the archive's .gz member as a few parallel byte ranges and writes
-// them to stdout in order. eBird answers bursts of requests with HTTP 429, so chunks are large
-// (few requests) and 429s are retried after the delay it asks for.
-const chunkSize = 256 << 20
+// eBird serves each connection at 3–10 MB/s and answers bursts of requests with HTTP 429, so the
+// archive's .gz member is downloaded over two connections in large byte ranges (few requests),
+// reassembled in order, with 429s retried after the delay eBird asks for.
+const (
+	chunkSize   = 256 << 20
+	connections = 2
+)
 
-func runFetch(args []string) error {
-	if len(args) < 1 {
-		return errors.New("usage: ebdagg fetch URL [connections] [limit-bytes]")
-	}
-	url, conns, limit := args[0], 2, int64(0)
-	if len(args) > 1 {
-		conns, _ = strconv.Atoi(args[1])
-	}
-	if len(args) > 2 {
-		limit, _ = strconv.ParseInt(args[2], 10, 64)
-	}
+// member is the first file inside an EBD .tar: the .txt.gz we want, followed by small metadata files.
+type member struct {
+	url, name string
+	size      int64 // bytes of the .gz
+}
 
-	// The .tar holds the .txt.gz first, then small metadata files we don't need
+func tarMember(url string) (member, error) {
 	header, _, err := getRange(url, 0, 512)
 	if err != nil {
-		return err
+		return member{}, err
 	}
-	name := strings.TrimRight(string(header[:100]), "\x00")
-	size := tarSize(header[124:136])
-	if !strings.HasSuffix(name, ".gz") || size <= 0 {
-		return fmt.Errorf("unexpected first tar member %q (%d bytes)", name, size)
+	m := member{url: url, name: strings.TrimRight(string(header[:100]), "\x00"), size: tarSize(header[124:136])}
+	if !strings.HasSuffix(m.name, ".gz") || m.size <= 0 {
+		return m, fmt.Errorf("unexpected first tar member %q (%d bytes)", m.name, m.size)
 	}
-	if limit > 0 && limit < size {
-		size = limit
-	}
-	log.Printf("fetch: %s, %.1f GB, %d connections", name, float64(size)/1e9, conns)
+	return m, nil
+}
 
+// open streams the member's bytes [from, end) in order; end <= 0 means to the end of the member.
+func (m member) open(from, end int64) io.ReadCloser {
+	if end <= 0 || end > m.size {
+		end = m.size
+	}
+	pr, pw := io.Pipe()
 	type result struct {
 		data []byte
 		err  error
 	}
-	chunks := int((size + chunkSize - 1) / chunkSize)
-	// One buffered slot per chunk in flight; writing in order bounds memory to ~2×conns chunks
-	slots := make(chan chan result, conns*2)
+	slots := make(chan chan result, connections*2)
 	go func() {
-		sem := make(chan struct{}, conns)
-		for i := range chunks {
-			start := 512 + int64(i)*chunkSize
-			n := min(chunkSize, size-int64(i)*chunkSize)
+		defer close(slots)
+		sem := make(chan struct{}, connections)
+		for start := from; start < end; start += chunkSize {
+			n := min(chunkSize, end-start)
 			slot := make(chan result, 1)
 			slots <- slot
 			sem <- struct{}{}
-			go func() {
+			go func(start int64) {
 				defer func() { <-sem }()
 				var r result
 				for attempt := 1; attempt <= 10; attempt++ {
 					var wait time.Duration
-					if r.data, wait, r.err = getRange(url, start, n); r.err == nil {
+					if r.data, wait, r.err = getRange(m.url, 512+start, n); r.err == nil {
 						break
 					}
 					wait = max(wait, time.Duration(attempt)*30*time.Second)
-					log.Printf("fetch: chunk %d attempt %d: %v (retrying in %s)", i, attempt, r.err, wait)
+					log.Printf("fetch: range at %d attempt %d: %v (retrying in %s)", start, attempt, r.err, wait)
 					time.Sleep(wait)
 				}
 				slot <- r
-			}()
+			}(start)
 		}
-		close(slots)
 	}()
-
-	began, written, nextLog := time.Now(), int64(0), int64(10e9)
-	for slot := range slots {
-		r := <-slot
-		if r.err != nil {
-			return r.err
+	go func() {
+		began, written, nextLog := time.Now(), int64(0), int64(10e9)
+		for slot := range slots {
+			r := <-slot
+			if r.err != nil {
+				pw.CloseWithError(r.err)
+				return
+			}
+			if _, err := pw.Write(r.data); err != nil {
+				return // reader closed (e.g. paused): stop
+			}
+			written += int64(len(r.data))
+			if written >= nextLog {
+				nextLog += 10e9
+				log.Printf("fetch: %s at %.0f of %.0f GB, %.1f MB/s", m.name, float64(from+written)/1e9, float64(m.size)/1e9, float64(written)/1e6/time.Since(began).Seconds())
+			}
 		}
-		if _, err := os.Stdout.Write(r.data); err != nil {
-			return err
-		}
-		written += int64(len(r.data))
-		if written >= nextLog {
-			nextLog += 10e9
-			log.Printf("fetch: %.0f GB, %.0f MB/s", float64(written)/1e9, float64(written)/1e6/time.Since(began).Seconds())
-		}
-	}
-	log.Printf("fetch: done, %.1f GB in %s", float64(written)/1e9, time.Since(began).Round(time.Second))
-	return nil
+		pw.Close()
+	}()
+	return pr
 }
 
 var client = &http.Client{Timeout: 30 * time.Minute}

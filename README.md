@@ -11,7 +11,10 @@
 
 A monthly GitHub Actions job streams the World [eBird Basic Dataset](https://ebird.org/data/download)
 (~250 GB compressed) straight from eBird through `pipeline/` (Go), which counts, per hotspot and month,
-how many complete checklists there were and how many reported each species. The trimmed result is
+how many complete checklists there were and how many reported each species. eBird's download speed
+varies (3–17 MB/s), so the build runs in up to four ~5-hour parts: each pauses the decompressor at a
+block boundary (`pipeline/flatex`, a resumable copy of Go's `compress/flate`), saves its counts, and
+the next part carries on. The trimmed result is
 published as static JSON alongside `public/index.html` on GitHub Pages; ranking happens in the browser.
 
 - Page-only changes (`public/`) deploy in about a minute via "Deploy page changes", reusing the last build's data.

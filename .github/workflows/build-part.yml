@@ -1,0 +1,59 @@
+name: Build part
+
+# One leg of the eBird build: carries on from the previous part's saved state for up to ~5 hours
+# (GitHub stops jobs at 6), then saves its state for the next part.
+on:
+  workflow_call:
+    inputs:
+      part: { type: number, required: true }
+      resume_from: { type: string, default: "" } # previous part's state artifact
+      release: { type: string, required: true }
+      sample_gb: { type: string, default: "0" }
+      stop_after: { type: string, default: "5h15m" }
+    outputs:
+      done:
+        description: "true once the whole dataset has been read"
+        value: ${{ jobs.build.outputs.done }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      done: ${{ steps.run.outputs.done }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: pipeline/go.mod
+          cache: false
+
+      - name: Build aggregator
+        run: cd pipeline && go build -o ../ebdagg .
+
+      - name: Fetch state from ${{ inputs.resume_from }}
+        if: inputs.resume_from != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.resume_from }}
+          path: state
+
+      - name: Stream EBD from eBird and count
+        id: run
+        env:
+          REL: ${{ inputs.release }}
+          SAMPLE_GB: ${{ inputs.sample_gb }}
+          STOP_AFTER: ${{ inputs.stop_after }}
+        run: |
+          set -euo pipefail
+          ./ebdagg build -release "$REL" -state state -stop-after "$STOP_AFTER" -limit-gb "$SAMPLE_GB"
+          echo "done=$(jq -r .Done state/progress.json)" >> "$GITHUB_OUTPUT"
+          du -sh state
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: state-${{ inputs.part }}
+          path: state
+          retention-days: 7
+          compression-level: 1
